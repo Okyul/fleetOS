@@ -1,0 +1,31 @@
+# ESP-IDF build artifacts
+build/
+sdkconfig
+sdkconfig.old
+managed_components/
+dependencies.lock
+*.elf
+*.map
+
+# Secrets — WiFi creds, MQTT creds, R2 keys live here, never in git
+sdkconfig.defaults
+.env
+secrets/
+
+# Built firmware binaries — uploaded to R2, not committed
+firmware-builds/
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Claude Code
+.claude/
