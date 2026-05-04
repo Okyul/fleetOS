@@ -12,7 +12,7 @@ Cloud: Cloudflare R2 (firmware hosting), HiveMQ Cloud (MQTT broker).
 
 **Goal:** ESP-IDF installed, hardware confirmed working, LED blinking at 1Hz from custom code.
 
-**Status:** Day 1a complete (toolchain + build proven). Day 1b (flash + visual blink) deferred — board ships in ~2 days.
+**Status:** Day 1 complete. ✅ Toolchain installed, ✅ board flashed, ✅ 1Hz blink visually confirmed, tagged `v1.0.0`.
 
 ### What we did
 - Installed WSL2 + Ubuntu 24.04 (`wsl --install -d Ubuntu`).
@@ -24,11 +24,14 @@ Cloud: Cloudflare R2 (firmware hosting), HiveMQ Cloud (MQTT broker).
 - Ran `install.sh esp32`: Xtensa GCC 13.2.0, Python 3.12 venv with esptool 4.11, all deps in `~/.espressif/`.
 - Built `firmware/main.c` end-to-end: `fleetos.bin` 163 KB (84% of partition free).
 - Added `tools/build.sh` to absorb the path-workaround.
+- **Day 1b (board arrived):** `usbipd bind 2-1` (admin PS, one-time) → `usbipd attach --wsl --busid 2-1`. Board appeared as `/dev/ttyUSB0` (root:dialout). `./tools/build.sh flash` wrote bootloader + partition-table + app at 460 kbaud, hard-reset via RTS pin. Captured boot log over serial via a tiny Python DTR/RTS pulse + read script. Boot log shows `I (310) fleetos: FleetOS firmware v1.0.0 booting` + `GPIO[2]` configured. Visual confirmation: onboard LED blinking at 1Hz. Tagged `v1.0.0`.
 
 ### What worked
 - ESP-IDF install was clean — single `install.sh esp32` call, no manual fiddling.
 - `idf.py set-target esp32` configured fine even at the Dropbox path.
 - Once mirrored to `~/fleetos-poc/`, the build succeeded on the first try and produced a valid esp32 image.
+- Hardware came up first try. CH340 driver was already installed on Windows (board enumerated as COM5). usbipd handed it cleanly to WSL. esptool flashed at 460 kbaud, no retries.
+- `ESP_LOGI(TAG, ...)` survives unchanged from source to serial output — easy to grep.
 
 ### What broke
 - **Parens in path break Ninja.** The Dropbox path `My PC (LAPTOP-M5075A75)` made the bootloader `check_sizes` step fail with `/bin/sh: 1: Syntax error: "(" unexpected`. Some ESP-IDF custom commands escape spaces with backslashes but not parens, so `/bin/sh` choked on the literal `(`. Fix: keep source in Dropbox, build at `~/fleetos-poc/firmware/`. `tools/build.sh` rsyncs before building.
@@ -40,16 +43,19 @@ Cloud: Cloudflare R2 (firmware hosting), HiveMQ Cloud (MQTT broker).
 - The build system produces three artifacts: `bootloader.bin`, `partition-table.bin`, `fleetos.bin`. All three flash separately at known offsets; `idf.py flash` chains them with the right offsets.
 - `app_main()` is the entry point ESP-IDF expects in the `main` component. FreeRTOS is already running by the time it's called.
 - Partition usage is reported in the build output: 84% free in the smallest app slot today, will shrink once WiFi + MQTT + OTA libraries link in on Days 2–3.
+- **Flash size mismatch (Day 3 todo):** boot log warned `Detected size(4096k) larger than the size in the binary image header(2048k)`. Board has 4 MB, sdkconfig defaults to 2 MB. Day 3 has to bump `CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y` to fit two OTA app slots.
+- **DTR/RTS reset trick:** to capture the boot log non-interactively without `idf.py monitor`, pulse RTS while DTR is low — that's what esptool does internally for `--after hard_reset`. Useful pattern for scripted log capture later.
+- usbipd `bind` is the admin-only one-time step; `attach` is per-session and doesn't need admin once bound.
 
 ### Time spent
-- ~45 min wall clock from "files transferred" to "build green".
+- ~45 min for Day 1a (setup + first build). ~10 min for Day 1b (flash + visual confirm) once the board arrived.
 
-### Tomorrow's first action
-1. **Once the ESP32 arrives:** plug into Windows USB, install CH340 driver if Device Manager doesn't auto-detect (https://www.wch-ic.com/downloads/CH341SER_EXE.html).
-2. From admin PowerShell: `usbipd list` → find the CH340/CP210x device → `usbipd bind --busid X-Y` → `usbipd attach --wsl --busid X-Y`. Verify `ls /dev/ttyUSB*` shows up in WSL.
-3. From inside a WSL terminal at the project root: `./tools/build.sh flash monitor`. Expect 1Hz blink on GPIO2 + boot log line `FleetOS firmware v1.0.0 booting`.
-4. Tag commit as `v1.0.0` once the blink is visually confirmed.
-5. Then start Day 2 (WiFi + MQTT).
+### Day 2 first action
+1. Add `nvs_flash`, `esp_wifi`, `esp_event`, `esp_netif` to `firmware/main/CMakeLists.txt` REQUIRES.
+2. WiFi station init in `app_main`, connect to home network. Creds need to NOT be in git — use `sdkconfig.defaults` with placeholders + a `secrets.h` (gitignored) for real values, or push them through Kconfig prompts. Decide before writing code.
+3. Add MQTT client (`esp-mqtt`) connecting to HiveMQ Cloud over TLS. HiveMQ gives a `mqtts://...:8883` URL + username/password — load from the same secrets path as WiFi.
+4. On connect, publish `fleet/<device-id>/alive` with JSON `{"version":"1.0.0","mac":"ec:e3:34:a4:0d:4c"}`. Subscribe to `fleet/<device-id>/cmd`.
+5. Python host CLI: `host/fleetctl.py status` subscribes to `fleet/+/alive`, prints what it sees.
 
 ---
 
