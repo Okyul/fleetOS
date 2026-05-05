@@ -24,15 +24,15 @@
 #include "wifi.h"
 #include "mqtt.h"
 
-#define FIRMWARE_VERSION    "1.0.0"
+#define FIRMWARE_VERSION    "2.0.0"
 
 // GPIO2 is the FNK0090's onboard LED (active-high). Confirmed against
 // Freenove's own docs at docs.freenove.com/projects/fnk0090.
 #define BLINK_GPIO          GPIO_NUM_2
 
-// Half-period in ms. 500ms on + 500ms off = 1Hz. v2 firmware will set this
-// to 100ms (5Hz) so the OTA flip is unmistakable on video.
-#define BLINK_HALF_PERIOD_MS 500
+// Half-period in ms. v1 = 500 (1Hz), v2 = 100 (5Hz). Single source of truth
+// for the visible OTA flip — change this and FIRMWARE_VERSION together.
+#define BLINK_HALF_PERIOD_MS 100
 
 static const char *TAG = "fleetos";
 
