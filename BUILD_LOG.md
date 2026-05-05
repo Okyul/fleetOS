@@ -182,6 +182,25 @@ Cloud: Cloudflare R2 (firmware hosting), HiveMQ Cloud (MQTT broker).
 ### Time spent
 
 - ~90 min: design + code, no real debugging beyond the sdkconfig sed bug.
+- +20 min: end-to-end rollback validation with a deliberately-broken v3.1.0 binary.
+
+### Rollback validation (real broker trace)
+
+Built a v3.1.0 binary with the `fleetos_ota_mark_valid()` call commented out (boots fine, talks to MQTT, just never confirms healthiness). Uploaded to R2, pushed via `fleetctl cmd`, captured the full broker activity:
+
+```
+15:49:11  cmd push                       (status → "downloading")
+15:49:26  status → "rebooting"           (download done, esp_restart)
+15:49:32  alive: status=offline          (last-will, reboot in progress)
+15:49:33  alive flips to v3.1.0          (boot + MQTT connect)
+15:49:33  status → "ready", detail=3.1.0 (broker accepts, mark_valid NEVER called)
+15:50:00  heartbeat from v3.1.0          (uptime 31s, still running)
+15:50:33  alive: status=offline          (WATCHDOG FIRED — exactly 60s later)
+15:50:34  alive flips to v3.0.0          (bootloader reverted to good slot)
+15:50:34  status → "ready", detail=3.0.0 (known-good, healthy)
+```
+
+Total time bad-firmware-push → recovered = **1m23s**, fully automatic. Patched `mqtt.c` was reverted (never committed); `firmware-builds/fleetos-v3.1.0.bin` stays gitignored as a manual-test artifact.
 
 ### Day 5 first action
 
