@@ -63,6 +63,43 @@ Cloud: Cloudflare R2 (firmware hosting), HiveMQ Cloud (MQTT broker).
 
 **Goal:** Device connects to WiFi, connects to HiveMQ Cloud over TLS, subscribes to a topic, publishes "I'm alive" with firmware version on boot. Python host script can send/receive on the same broker.
 
+**Status:** ✅ complete. Device boots → WiFi → MQTT/TLS → publishes retained `{"version":"1.0.0","device_id":"ece334a40d4c","uptime_ms":3878}` on `fleet/<device-id>/alive`. Host CLI receives it on subscribe.
+
+### What we did
+- **Secrets via Kconfig.** `firmware/main/Kconfig.projbuild` exposes 5 string options (WIFI_SSID, WIFI_PASSWORD, MQTT_BROKER_URI, MQTT_USERNAME, MQTT_PASSWORD). User sets via `idf.py menuconfig`; values bake into `sdkconfig` (gitignored).
+- **`sdkconfig.defaults` is now committed** (was previously gitignored as a "secrets dump"). Holds shareable build defaults: `CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y`, `CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y`. Updated `.gitignore` comment to match.
+- **Split firmware into modules:** `wifi.c/h` (STA bring-up, event handling, MAC→device-id), `mqtt.c/h` (TLS connect, retained alive publish, cmd subscribe). `main.c` orchestrates: NVS init → blink task → wifi (blocking) → mqtt (non-blocking).
+- **TLS via crt_bundle.** `esp_crt_bundle_attach` uses ESP-IDF's bundled CA store. No pinned cert to maintain; HiveMQ can rotate Let's Encrypt certs without breaking us.
+- **Last Will** registered on the alive topic so a hard disconnect publishes `{"status":"offline"}` to the same retained topic.
+- **Host CLI:** `host/fleetctl.py` with `status` (subscribe to `fleet/+/alive`) and `cmd` (publish to `fleet/<id>/cmd`) subcommands. Credentials via `.env` (gitignored) + python-dotenv. `host/.env.example` checked in as template.
+
+### What worked
+- Kconfig prompt UX is fine once you know `Enter` opens the input dialog, paste with `Ctrl+Shift+V`, `Enter` to commit, `S` then `Q` to save+quit.
+- crt_bundle "just worked" against HiveMQ Cloud's Let's Encrypt cert — no pinning, no PEM file, no hassle.
+- Last Will + retained alive on the same topic gives the host CLI a single-topic-per-device view of liveness for free.
+- `paho-mqtt` 2.x `tls_set()` with no args picks up Ubuntu's system CA bundle correctly. No `certifi` needed.
+
+### What broke
+- **Menuconfig silently dropped 3 chars from the broker URI on paste** (`bd6` missing from the cluster ID). The truncated hostname still resolved into HiveMQ's shared infrastructure and TLS handshake succeeded against a wildcard cert, but the wrong cluster rejected with `"Connection refused, not authorized"` (`type=2`, `tls=0x0`). Fix: `sed -i` the correct URI directly into `~/fleetos-poc/firmware/sdkconfig`. Lesson: for long URIs, paste then visually verify the field, or `grep MQTT_BROKER_URI ~/fleetos-poc/firmware/sdkconfig` after exiting menuconfig.
+- **Ubuntu 24.04 PEP 668 blocks `pip install` system-wide.** Need a venv. Bonus: a venv created at `host/.venv` (on `/mnt/c`) inherited the externally-managed marker because Linux symlinks don't fully resolve on Windows DrvFS. Fix: put venvs at `~/fleetos-venv` (Linux home), not `/mnt/c`.
+- **Stale interactive WSL session swallowed Python output.** First two attempts to run `python -u fleetctl.py status` produced zero terminal output despite the script working perfectly when invoked from a non-interactive `wsl -- bash -lc` shell. `wsl --shutdown` + fresh terminal fixed it. No clean root-cause; suspect a console-host stdout-buffer wedge, possibly from an earlier broken venv.
+
+### What I learned
+- esp-mqtt event API: register `ESP_EVENT_ANY_ID`, dispatch on `event_id` inside the handler. `esp_mqtt_client_publish` returns the msg_id (useful for log correlation).
+- `esp_event_handler_instance_register` for both `WIFI_EVENT, ESP_EVENT_ANY_ID` and `IP_EVENT, IP_EVENT_STA_GOT_IP`. Same handler can dispatch on `(base, id)`.
+- Retained + QoS 1 on a single per-device topic is the lightest possible "is this device alive?" pattern. No separate keepalive topic, no metric DB.
+- Binary grew from 163 KB (Day 1) to 962 KB (Day 2) — WiFi + TLS + cJSON + MQTT all linked in. Smallest factory app partition is 1 MB at default partition table; we're at **8% free**. Day 3's custom partition table (two 1 MB OTA slots) will need careful sizing — may need to bump to 1.25 MB slots or strip log strings.
+
+### Time spent
+- ~75 min: write code, ~30 min debugging the menuconfig URI truncation + Python venv issues.
+
+### Day 3 first action
+1. Custom partition table at `firmware/partitions.csv` with `nvs`, `phy_init`, `otadata`, `ota_0`, `ota_1` (no `factory`).
+2. Verify two 1+ MB app slots fit in 4 MB after bootloader + nvs overhead. If 1 MB is too tight (we were at 8% free), bump to 1.25 MB and shrink `nvs` accordingly.
+3. Add `esp_https_ota` call in `mqtt.c` MQTT_EVENT_DATA handler — when topic is `cmd` and JSON has a `url` field, kick off the download.
+4. Build v1.0.0 (1Hz) → upload to R2 with public read → push URL via `python fleetctl.py cmd ece334a40d4c '{"url":"https://..."}'` → device flashes → reboots into v1.0.0 again (no-op test).
+5. Bump `FIRMWARE_VERSION` to 2.0.0 + change `BLINK_HALF_PERIOD_MS` to 100ms (5Hz) → upload v2 → push URL → blink should change rate after reboot. **That's the demo.**
+
 ---
 
 ## Day 3 — OTA flow
