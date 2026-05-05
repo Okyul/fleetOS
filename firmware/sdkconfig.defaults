@@ -1,0 +1,13 @@
+# Shareable build defaults. Loaded by ESP-IDF before merging in user-set
+# sdkconfig values. NEVER put secrets here — secrets go in sdkconfig (gitignored)
+# via Kconfig.projbuild prompts.
+
+# 4 MB flash — board has 4 MB; default is 2 MB which fits today's blink but
+# leaves no room for two OTA app slots on Day 3.
+CONFIG_ESPTOOLPY_FLASHSIZE_4MB=y
+CONFIG_ESPTOOLPY_FLASHSIZE="4MB"
+
+# Use the bundled CA cert store for TLS — covers Let's Encrypt (HiveMQ Cloud)
+# and most public roots. Avoids pinning a specific root that could rotate.
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE=y
+CONFIG_MBEDTLS_CERTIFICATE_BUNDLE_DEFAULT_FULL=y

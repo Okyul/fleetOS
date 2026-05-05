@@ -7,8 +7,9 @@ dependencies.lock
 *.elf
 *.map
 
-# Secrets — WiFi creds, MQTT creds, R2 keys live here, never in git
-sdkconfig.defaults
+# Secrets live in sdkconfig (gitignored above) via Kconfig.projbuild prompts,
+# and in .env for the host CLI. sdkconfig.defaults is committed — it holds
+# only shareable build defaults (flash size, log levels), never credentials.
 .env
 secrets/
 

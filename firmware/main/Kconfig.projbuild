@@ -1,0 +1,37 @@
+menu "FleetOS configuration"
+
+    config FLEETOS_WIFI_SSID
+        string "WiFi SSID"
+        default ""
+        help
+            SSID of the WiFi network the device should join. Set via
+            `idf.py menuconfig` (FleetOS configuration → WiFi SSID). Lives
+            in sdkconfig, which is gitignored.
+
+    config FLEETOS_WIFI_PASSWORD
+        string "WiFi password"
+        default ""
+        help
+            WPA2-PSK password for the SSID above. Empty for open networks.
+
+    config FLEETOS_MQTT_BROKER_URI
+        string "MQTT broker URI"
+        default "mqtts://"
+        help
+            HiveMQ Cloud broker URI. Format: mqtts://<cluster-id>.s1.eu.hivemq.cloud:8883
+            Must use mqtts:// (TLS); HiveMQ Cloud does not accept plain MQTT.
+
+    config FLEETOS_MQTT_USERNAME
+        string "MQTT username"
+        default ""
+        help
+            HiveMQ Cloud access credential username (set in HiveMQ console
+            under Access Management).
+
+    config FLEETOS_MQTT_PASSWORD
+        string "MQTT password"
+        default ""
+        help
+            HiveMQ Cloud access credential password.
+
+endmenu
