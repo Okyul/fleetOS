@@ -148,6 +148,48 @@ Cloud: Cloudflare R2 (firmware hosting), HiveMQ Cloud (MQTT broker).
 
 **Goal:** Failure modes handled (bad URL, network drop, version mismatch). Logging that looks impressive on video. Demo recorded.
 
+**Status:** Hardening landed (rollback, status topic, heartbeat, release helper, README). Tagged `v3.0.0`. Demo video still to record.
+
+### What we did
+
+- **Rollback safety** (`firmware/main/ota.c`). `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` so the bootloader marks freshly-OTA'd images as `PENDING_VERIFY` on first boot. `fleetos_ota_init` (called from `app_main` before MQTT bringup) checks the running partition's verification state. If pending, it spawns a watchdog task that calls `esp_ota_mark_app_invalid_rollback_and_reboot()` after 60s unless `fleetos_ota_mark_valid` is called first. Wired to MQTT_EVENT_CONNECTED — first successful broker session cancels the watchdog. A bad firmware that can't get on WiFi or talk to HiveMQ gets reverted to the previous good slot automatically.
+- **Status topic** (`fleet/<id>/status`, retained). Device publishes a state machine — `ready` on connect, `downloading` (with URL) when OTA starts, `rebooting` just before `esp_restart`, `error` (with error name) on failure. Last value is retained so subscribers see the device's current state immediately on connect. `fleetctl status` now subscribes both `alive` and `status` patterns.
+- **Heartbeat task** spawned after MQTT start. Every 30s, republishes alive with current `uptime_ms`, `free_heap`, and `rssi` (from `esp_wifi_sta_get_ap_info`). Lets the host show live device health without waiting for a boot.
+- **`tools/release.sh`**: `<version> [<half-period-ms>]` — sed-patches `FIRMWARE_VERSION` and optionally `BLINK_HALF_PERIOD_MS` in main.c, builds, copies the `.bin` to `firmware-builds/fleetos-v<version>.bin`. Removes the manual edit-build-rename dance.
+- **Real README**: pipeline ascii diagram, list of what's actually shipped, hardware + cloud account requirements, full clone-and-run setup, layout, scope explicitly mirrored from CLAUDE.md's DO NOT list.
+- **`v3.0.0` baseline**: 2Hz blink (250ms half-period), distinct from v1 (1Hz) and v2 (5Hz) so the demo can show a three-version progression with three visibly different rates.
+
+### What worked
+
+- **`esp_ota_get_state_partition`** cleanly distinguishes the three boot cases (just-OTA'd / OTA-validated / esptool-flashed). The watchdog only arms when there's actually something to roll back to.
+- **Storing the `esp_mqtt_client_handle_t` in a static** lets the heartbeat task and `fleetos_mqtt_publish_status` publish without piggybacking on an event handler. The handle is the single source of truth for "the client" — no global state explosion.
+- **Retained status as a state machine**: subscribers connect any time and instantly see whether the device is `ready`, mid-`downloading`, etc. No polling, no separate "current state" REST call. MQTT's retained-message semantics give us this for free.
+- **Heartbeat overwriting retained alive** also means stale liveness is impossible — `fleetctl status` always sees the latest 30s-old reading.
+
+### What broke
+
+- **First sed-patch of `sdkconfig` for rollback config left a stale `# CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE is not set` line** alongside the new `=y` value (because `grep -q` found the new line first and skipped the sed-replace). Cleanup pass to delete the comment line worked, but the script flow is fragile — should be a single deterministic sed instead of grep-then-conditionally-edit.
+- **Background serial captures keep coming back empty.** Same pattern as Day 3 — `python3 -c "..."` reading `/dev/ttyUSB0` works in the foreground but not as a `run_in_background` task. Suspect the WSL+usbipd serial bridge doesn't multiplex cleanly. Worked around by reading the broker's retained alive instead — actually a better source of truth since it doesn't depend on the serial port.
+- The CR/LF warnings on every commit are getting old. Should add a `.gitattributes` pinning `*.sh` and `*.c` to LF, but it's purely cosmetic — git stores LF on disk regardless of the warning.
+
+### What I learned
+
+- **`PENDING_VERIFY` only applies to OTA-installed images.** A first-flash via `idf.py flash` writes the image with `ESP_OTA_IMG_UNDEFINED` state — bootloader treats it as good. So the rollback watchdog is a no-op on every developer flash, only meaningful on real OTA updates. Good design — no extra friction for local dev.
+- **`esp_wifi_sta_get_ap_info()` returns the connected AP's RSSI cheaply** — no scan needed. Perfect for periodic heartbeat reporting; sub-millisecond call.
+- **`heap_caps_get_free_size(MALLOC_CAP_DEFAULT)`** vs `esp_get_free_heap_size()` — the former is more precise (only RAM matching the capability). Useful for spotting leaks if the heartbeat number trends down over hours.
+- **Last Will + retained alive on the same topic** has a subtle interaction: on a clean reboot we re-publish alive (overwriting the will), but on a hard crash the will message replaces alive on the broker. Subscribers connecting later see whichever is current. Self-healing for free.
+
+### Time spent
+
+- ~90 min: design + code, no real debugging beyond the sdkconfig sed bug.
+
+### Day 5 first action
+
+1. **Record the demo video.** Shot list: 1Hz blink visible → run `fleetctl status` (alive + ready shown) → upload v2.0.0.bin → push URL via `fleetctl cmd` → watch `downloading` → `rebooting` → boot → new alive at 5Hz with `version=2.0.0`. ~60–90s, no narration needed.
+2. Optional rollback demo: build a deliberately-broken binary (e.g., wrong WiFi SSID baked in, or an early `abort()`), upload, push, watch the rollback watchdog kick in after 60s and revert.
+3. Write the LinkedIn post — link to the GitHub repo + the demo video.
+4. Push the repo public on GitHub.
+
 ---
 
 ## Day 5 — Polish + ship
