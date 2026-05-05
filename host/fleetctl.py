@@ -58,15 +58,15 @@ def _make_client(cfg: dict, client_id: str) -> mqtt.Client:
 
 
 def cmd_status(cfg: dict) -> int:
-    """Subscribe to fleet/+/alive, print messages as devices report in."""
+    """Subscribe to fleet/+/{alive,status}, print messages as devices report."""
     client = _make_client(cfg, client_id="fleetctl-status")
 
     def on_connect(client, userdata, flags, reason_code, properties):
         if reason_code != 0:
             print(f"connect failed: {reason_code}", file=sys.stderr)
             return
-        print(f"connected to {cfg['host']}, subscribing fleet/+/alive")
-        client.subscribe("fleet/+/alive", qos=1)
+        print(f"connected to {cfg['host']}, subscribing fleet/+/alive + fleet/+/status")
+        client.subscribe([("fleet/+/alive", 1), ("fleet/+/status", 1)])
 
     def on_message(client, userdata, msg):
         try:
