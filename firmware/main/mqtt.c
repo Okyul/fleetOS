@@ -2,22 +2,28 @@
 //
 // TLS trust anchors come from ESP-IDF's bundled CA store (enabled in
 // sdkconfig.defaults via CONFIG_MBEDTLS_CERTIFICATE_BUNDLE). HiveMQ Cloud's
-// certs chain to Let's Encrypt's ISRG Root X1, which is in the bundle, so
-// the broker validates without us pinning anything.
+// certs chain to Let's Encrypt's ISRG Root X1, which is in the bundle.
 //
-// Topic structure:
-//   fleet/<device-id>/alive   -- retained boot announcement (this client publishes)
-//   fleet/<device-id>/cmd     -- inbound commands from host (this client subscribes)
-//   fleet/<device-id>/status  -- runtime status updates (Day 3+)
+// Topic structure: see mqtt.h.
+//
+// On MQTT_EVENT_CONNECTED we (a) publish retained alive, (b) subscribe cmd,
+// (c) publish retained status="ready", and (d) call fleetos_ota_mark_valid
+// — the "we got back on the network successfully" signal that cancels the
+// rollback watchdog (see ota.c).
 
 #include "mqtt.h"
 
 #include <stdio.h>
 #include <string.h>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_crt_bundle.h"
+#include "esp_wifi.h"
+#include "esp_heap_caps.h"
 #include "mqtt_client.h"
 #include "cJSON.h"
 
@@ -26,25 +32,80 @@
 
 static const char *TAG = "mqtt";
 
-// Borrowed at start time; freed never (intentional — they're meant to be
-// `static const` from main.c).
+// Borrowed at start time; never freed (intentional — they're static const
+// from main.c).
 static const char *s_device_id;
 static const char *s_firmware_version;
 
 static char s_topic_alive[64];
 static char s_topic_cmd[64];
+static char s_topic_status[64];
+
+// Stored at start time so the heartbeat + status publish helpers can use it
+// without having an event handle.
+static esp_mqtt_client_handle_t s_client;
 
 // Build the alive JSON payload. Caller frees with cJSON_free.
+// Includes runtime metrics (uptime, free heap, RSSI) so the host can show
+// live device health, not just version+id.
 static char *build_alive_payload(void)
 {
     cJSON *root = cJSON_CreateObject();
     cJSON_AddStringToObject(root, "version", s_firmware_version);
     cJSON_AddStringToObject(root, "device_id", s_device_id);
-    // esp_timer_get_time returns microseconds since boot.
     cJSON_AddNumberToObject(root, "uptime_ms", esp_timer_get_time() / 1000);
+    cJSON_AddNumberToObject(root, "free_heap", heap_caps_get_free_size(MALLOC_CAP_DEFAULT));
+
+    wifi_ap_record_t ap;
+    if (esp_wifi_sta_get_ap_info(&ap) == ESP_OK) {
+        cJSON_AddNumberToObject(root, "rssi", ap.rssi);
+    }
+
     char *out = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     return out;
+}
+
+static void publish_alive(void)
+{
+    if (!s_client) {
+        return;
+    }
+    char *payload = build_alive_payload();
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic_alive, payload, 0, 1, 1);
+    ESP_LOGI(TAG, "published alive (msg_id=%d): %s", msg_id, payload);
+    cJSON_free(payload);
+}
+
+void fleetos_mqtt_publish_status(const char *state, const char *detail)
+{
+    if (!s_client || !state) {
+        return;
+    }
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "state", state);
+    if (detail) {
+        cJSON_AddStringToObject(root, "detail", detail);
+    }
+    cJSON_AddNumberToObject(root, "uptime_ms", esp_timer_get_time() / 1000);
+    char *payload = cJSON_PrintUnformatted(root);
+    int msg_id = esp_mqtt_client_publish(s_client, s_topic_status, payload, 0, 1, 1);
+    ESP_LOGI(TAG, "published status (msg_id=%d): %s", msg_id, payload);
+    cJSON_free(payload);
+    cJSON_Delete(root);
+}
+
+static void heartbeat_task(void *pv)
+{
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(30000));
+        publish_alive();
+    }
+}
+
+void fleetos_mqtt_heartbeat_start(void)
+{
+    xTaskCreate(heartbeat_task, "heartbeat", 4096, NULL, 4, NULL);
 }
 
 static void event_handler(void *handler_args, esp_event_base_t base,
@@ -57,14 +118,17 @@ static void event_handler(void *handler_args, esp_event_base_t base,
     case MQTT_EVENT_CONNECTED: {
         ESP_LOGI(TAG, "connected to broker");
 
-        char *payload = build_alive_payload();
-        // QoS 1 + retained — anyone subscribing later sees the latest alive.
-        int msg_id = esp_mqtt_client_publish(client, s_topic_alive, payload, 0, 1, 1);
-        ESP_LOGI(TAG, "published alive on %s (msg_id=%d): %s", s_topic_alive, msg_id, payload);
-        cJSON_free(payload);
+        publish_alive();
 
-        msg_id = esp_mqtt_client_subscribe(client, s_topic_cmd, 1);
+        int msg_id = esp_mqtt_client_subscribe(client, s_topic_cmd, 1);
         ESP_LOGI(TAG, "subscribed %s (msg_id=%d)", s_topic_cmd, msg_id);
+
+        fleetos_mqtt_publish_status("ready", s_firmware_version);
+
+        // We're alive on the network and the broker accepted us. If this
+        // boot was a freshly-OTA'd image (PENDING_VERIFY), this cancels
+        // the rollback watchdog. Idempotent.
+        fleetos_ota_mark_valid();
         break;
     }
     case MQTT_EVENT_DISCONNECTED:
@@ -75,17 +139,16 @@ static void event_handler(void *handler_args, esp_event_base_t base,
                  event->topic_len, event->topic,
                  event->data_len, event->data);
 
-        // Only act on the cmd topic. event->topic is NOT NUL-terminated.
         size_t cmd_len = strlen(s_topic_cmd);
         if (event->topic_len != (int)cmd_len ||
             memcmp(event->topic, s_topic_cmd, cmd_len) != 0) {
             break;
         }
 
-        // Parse JSON; we expect {"url":"https://..."}.
         cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
         if (!root) {
             ESP_LOGW(TAG, "cmd payload not valid JSON");
+            fleetos_mqtt_publish_status("error", "invalid_json");
             break;
         }
         cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
@@ -94,6 +157,7 @@ static void event_handler(void *handler_args, esp_event_base_t base,
             fleetos_ota_start(url->valuestring);
         } else {
             ESP_LOGW(TAG, "cmd missing 'url' string");
+            fleetos_mqtt_publish_status("error", "missing_url");
         }
         cJSON_Delete(root);
         break;
@@ -114,11 +178,12 @@ void fleetos_mqtt_start(const char *device_id, const char *firmware_version)
     s_device_id = device_id;
     s_firmware_version = firmware_version;
 
-    snprintf(s_topic_alive, sizeof(s_topic_alive), "fleet/%s/alive", device_id);
-    snprintf(s_topic_cmd, sizeof(s_topic_cmd), "fleet/%s/cmd", device_id);
+    snprintf(s_topic_alive,  sizeof(s_topic_alive),  "fleet/%s/alive",  device_id);
+    snprintf(s_topic_cmd,    sizeof(s_topic_cmd),    "fleet/%s/cmd",    device_id);
+    snprintf(s_topic_status, sizeof(s_topic_status), "fleet/%s/status", device_id);
 
-    // Last Will: if we drop without publishing a clean offline, the broker
-    // posts this so the host CLI sees us go down.
+    // Last Will: if we drop without publishing a clean offline, broker posts
+    // this on the alive topic so the host CLI sees us go down.
     char will_payload[96];
     snprintf(will_payload, sizeof(will_payload),
              "{\"device_id\":\"%s\",\"status\":\"offline\"}", device_id);
@@ -143,8 +208,8 @@ void fleetos_mqtt_start(const char *device_id, const char *firmware_version)
         },
     };
 
-    esp_mqtt_client_handle_t client = esp_mqtt_client_init(&cfg);
-    esp_mqtt_client_register_event(client, ESP_EVENT_ANY_ID, event_handler, NULL);
-    esp_mqtt_client_start(client);
+    s_client = esp_mqtt_client_init(&cfg);
+    esp_mqtt_client_register_event(s_client, ESP_EVENT_ANY_ID, event_handler, NULL);
+    esp_mqtt_client_start(s_client);
     ESP_LOGI(TAG, "client started, broker=%s", CONFIG_FLEETOS_MQTT_BROKER_URI);
 }
