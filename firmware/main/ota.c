@@ -1,16 +1,18 @@
-// HTTPS OTA driver. Wraps esp_https_ota in a dedicated FreeRTOS task so the
-// MQTT event handler can dispatch and return immediately (esp_https_ota
-// blocks for the entire download — calling it from the MQTT task would stall
-// keepalives and trigger a broker disconnect mid-update).
+// HTTPS OTA driver + rollback safety.
 //
-// Flow:
-//   1. fleetos_ota_start(url) — copy url, spawn ota_task, return.
-//   2. ota_task — esp_https_ota with the system CA bundle for TLS, then
-//      esp_restart on success. On failure, log and exit the task; the device
-//      keeps running the current firmware.
+// OTA flow: fleetos_ota_start(url) copies url, spawns ota_task, returns.
+// ota_task runs esp_https_ota (blocking) with the system CA bundle, then
+// esp_restart on success.
+//
+// Rollback safety (when CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y, which
+// sdkconfig.defaults sets): the bootloader marks freshly-OTA'd images as
+// PENDING_VERIFY on first boot. fleetos_ota_init checks that state. If
+// pending, it spawns a watchdog that reboots after 60s if mark_valid hasn't
+// been called — bootloader then reverts to the previous good slot.
 
 #include "ota.h"
 
+#include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -22,22 +24,29 @@
 #include "esp_https_ota.h"
 #include "esp_http_client.h"
 #include "esp_crt_bundle.h"
+#include "esp_ota_ops.h"
+
+#include "mqtt.h"
 
 static const char *TAG = "ota";
 
-// Big enough for an R2 presigned/public URL with a long key. Bumped from 512
-// because R2 .r2.dev hostnames + bucket + filename can push past 200 chars
-// and presigned URLs add query params.
 #define OTA_URL_MAX 1024
+#define ROLLBACK_TIMEOUT_MS 60000
 
 typedef struct {
     char url[OTA_URL_MAX];
 } ota_args_t;
 
+// Set true once we've confirmed the app is healthy. Read by the rollback
+// watchdog task. Plain bool is fine — single writer, single reader, never
+// transitions back to false.
+static volatile bool s_marked_valid;
+
 static void ota_task(void *pv)
 {
     ota_args_t *args = (ota_args_t *)pv;
     ESP_LOGI(TAG, "starting OTA from %s", args->url);
+    fleetos_mqtt_publish_status("downloading", args->url);
 
     esp_http_client_config_t http_cfg = {
         .url = args->url,
@@ -54,12 +63,77 @@ static void ota_task(void *pv)
 
     if (ret == ESP_OK) {
         ESP_LOGI(TAG, "OTA succeeded, rebooting in 2s");
+        fleetos_mqtt_publish_status("rebooting", NULL);
         vTaskDelay(pdMS_TO_TICKS(2000));
         esp_restart();
     }
 
     ESP_LOGE(TAG, "OTA failed: %s", esp_err_to_name(ret));
+    fleetos_mqtt_publish_status("error", esp_err_to_name(ret));
     vTaskDelete(NULL);
+}
+
+static void rollback_watchdog_task(void *pv)
+{
+    ESP_LOGI(TAG, "rollback watchdog armed: must mark valid within %d ms",
+             ROLLBACK_TIMEOUT_MS);
+    vTaskDelay(pdMS_TO_TICKS(ROLLBACK_TIMEOUT_MS));
+
+    if (s_marked_valid) {
+        ESP_LOGI(TAG, "watchdog: app marked valid, exiting");
+        vTaskDelete(NULL);
+        return;
+    }
+
+    ESP_LOGE(TAG, "watchdog: app NOT marked valid in %d ms; rolling back",
+             ROLLBACK_TIMEOUT_MS);
+    // This call writes INVALID to otadata for the running slot and reboots.
+    // The bootloader then picks the previous slot.
+    esp_ota_mark_app_invalid_rollback_and_reboot();
+    // Unreachable.
+}
+
+void fleetos_ota_init(void)
+{
+    const esp_partition_t *running = esp_ota_get_running_partition();
+    if (!running) {
+        ESP_LOGW(TAG, "no running partition info; skipping rollback setup");
+        return;
+    }
+
+    esp_ota_img_states_t state;
+    if (esp_ota_get_state_partition(running, &state) != ESP_OK) {
+        ESP_LOGW(TAG, "could not read partition state; skipping rollback setup");
+        return;
+    }
+
+    if (state == ESP_OTA_IMG_PENDING_VERIFY) {
+        ESP_LOGI(TAG, "running PENDING_VERIFY image (slot %s); arming rollback watchdog",
+                 running->label);
+        xTaskCreate(rollback_watchdog_task, "ota_wd", 3072, NULL, 5, NULL);
+    } else {
+        // Either ESP_OTA_IMG_VALID, ESP_OTA_IMG_UNDEFINED (first flash via
+        // idf.py flash, no OTA yet), or one of the other states. None require
+        // the watchdog — there's nothing to roll back to.
+        ESP_LOGI(TAG, "running slot %s state=%d; no rollback armed",
+                 running->label, (int)state);
+        s_marked_valid = true;
+    }
+}
+
+void fleetos_ota_mark_valid(void)
+{
+    if (s_marked_valid) {
+        return;
+    }
+    esp_err_t ret = esp_ota_mark_app_valid_cancel_rollback();
+    if (ret == ESP_OK) {
+        ESP_LOGI(TAG, "marked app valid, rollback cancelled");
+        s_marked_valid = true;
+    } else {
+        ESP_LOGW(TAG, "esp_ota_mark_app_valid_cancel_rollback failed: %s",
+                 esp_err_to_name(ret));
+    }
 }
 
 void fleetos_ota_start(const char *url)
@@ -80,7 +154,6 @@ void fleetos_ota_start(const char *url)
     }
     strlcpy(args->url, url, sizeof(args->url));
 
-    // 8 KB stack — esp_https_ota + mbedTLS + cJSON path is stack-heavy.
     BaseType_t r = xTaskCreate(ota_task, "ota", 8192, args, 5, NULL);
     if (r != pdPASS) {
         ESP_LOGE(TAG, "failed to spawn ota task");
