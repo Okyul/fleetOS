@@ -1,0 +1,24 @@
+# Custom partition table for OTA. No factory partition — first flash goes
+# straight into ota_0, subsequent OTAs alternate between ota_0 and ota_1.
+# Bootloader picks the active slot from otadata.
+#
+# Layout for the 4MB ESP32-WROOM-32 (0x000000 .. 0x400000):
+#   0x000000 .. 0x008000   bootloader + reserved
+#   0x008000 .. 0x009000   partition table (4 KB, fixed by IDF)
+#   0x009000 .. 0x00f000   nvs           (24 KB)
+#   0x00f000 .. 0x011000   otadata       (8  KB) -- which slot is active
+#   0x011000 .. 0x012000   phy_init      (4  KB)
+#   0x020000 .. 0x1A0000   ota_0         (1.5 MB)
+#   0x1A0000 .. 0x320000   ota_1         (1.5 MB)
+#   0x320000 .. 0x400000   unused        (~896 KB headroom)
+#
+# 1.5 MB per app slot leaves comfortable margin: today's binary is ~962 KB
+# and Day 3 will add esp_https_ota etc., still well under 1 MB. Headroom for
+# Day 4 hardening + cJSON growth.
+
+# Name,    Type, SubType, Offset,   Size,     Flags
+nvs,       data, nvs,     0x9000,   0x6000,
+otadata,   data, ota,     0xf000,   0x2000,
+phy_init,  data, phy,     0x11000,  0x1000,
+ota_0,     app,  ota_0,   0x20000,  0x180000,
+ota_1,     app,  ota_1,   0x1A0000, 0x180000,

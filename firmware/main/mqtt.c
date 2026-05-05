@@ -21,6 +21,7 @@
 #include "mqtt_client.h"
 #include "cJSON.h"
 
+#include "ota.h"
 #include "sdkconfig.h"
 
 static const char *TAG = "mqtt";
@@ -69,13 +70,34 @@ static void event_handler(void *handler_args, esp_event_base_t base,
     case MQTT_EVENT_DISCONNECTED:
         ESP_LOGW(TAG, "disconnected from broker");
         break;
-    case MQTT_EVENT_DATA:
+    case MQTT_EVENT_DATA: {
         ESP_LOGI(TAG, "rx topic=%.*s payload=%.*s",
                  event->topic_len, event->topic,
                  event->data_len, event->data);
-        // Day 3 will dispatch this to OTA when topic == cmd and payload has
-        // a "url" field. For now, we just log.
+
+        // Only act on the cmd topic. event->topic is NOT NUL-terminated.
+        size_t cmd_len = strlen(s_topic_cmd);
+        if (event->topic_len != (int)cmd_len ||
+            memcmp(event->topic, s_topic_cmd, cmd_len) != 0) {
+            break;
+        }
+
+        // Parse JSON; we expect {"url":"https://..."}.
+        cJSON *root = cJSON_ParseWithLength(event->data, event->data_len);
+        if (!root) {
+            ESP_LOGW(TAG, "cmd payload not valid JSON");
+            break;
+        }
+        cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
+        if (cJSON_IsString(url) && url->valuestring) {
+            ESP_LOGI(TAG, "OTA requested: %s", url->valuestring);
+            fleetos_ota_start(url->valuestring);
+        } else {
+            ESP_LOGW(TAG, "cmd missing 'url' string");
+        }
+        cJSON_Delete(root);
         break;
+    }
     case MQTT_EVENT_ERROR:
         ESP_LOGE(TAG, "error: type=%d, tls=0x%x, transport=0x%x",
                  event->error_handle->error_type,
