@@ -202,6 +202,18 @@ Built a v3.1.0 binary with the `fleetos_ota_mark_valid()` call commented out (bo
 
 Total time bad-firmware-push → recovered = **1m23s**, fully automatic. Patched `mqtt.c` was reverted (never committed); `firmware-builds/fleetos-v3.1.0.bin` stays gitignored as a manual-test artifact.
 
+### Pipeline automation: R2 S3 API end-to-end
+
+Replaced the "drag-drop into Cloudflare console" step with direct uploads via R2's S3-compatible API. boto3 with signature v4, region `auto`, endpoint `<account-id>.r2.cloudflarestorage.com`. Credentials in `host/.env` (gitignored), scoped to a single bucket via Cloudflare's "Object Read & Write" token type.
+
+Two new fleetctl subcommands:
+- `upload <file> [<key>]` — upload a local .bin, print public R2 URL
+- `ota <device-id> <version>` — find `firmware-builds/fleetos-v<version>.bin`, upload, publish URL via cmd
+
+`tools/release.sh` auto-uploads when R2 vars are present, falling back to manual upload instructions when they aren't.
+
+**Net result**: the whole demo is two commands — `./tools/release.sh 4.0.0 50` and `python host/fleetctl.py ota <device-id> 4.0.0`. End-to-end smoke test: 22 seconds from `fleetctl ota` to device running new firmware (build v3.0.2, 5Hz blink).
+
 ### Failure-mode validation (real broker traces)
 
 Beyond rollback, exercised every failure path the OTA cmd handler can hit. All published the right `status=error` event (after a small ota.c fix to also surface non-https / empty / OOM rejections):

@@ -22,10 +22,16 @@ C on ESP-IDF, MQTT-over-TLS to a hosted broker, signed-by-CA HTTPS pulls from ob
                          └────────────────┘
 ```
 
-1. **Build** a new firmware image (`tools/release.sh 4.0.0 50` for a v4 build with a 10Hz blink).
-2. **Upload** the resulting `.bin` to Cloudflare R2 (drag-drop in the dashboard).
-3. **Push** the public URL to a device: `python host/fleetctl.py cmd <device-id> '{"url":"https://pub-...r2.dev/fleetos-v4.0.0.bin"}'`
-4. The device downloads, writes to the inactive OTA slot, marks otadata, reboots, and re-publishes alive with `version=4.0.0`. Watch live: `python host/fleetctl.py status`.
+With R2 creds in `host/.env`, the whole demo is two commands:
+
+```bash
+./tools/release.sh 4.0.0 50              # bump main.c, build, upload to R2
+python host/fleetctl.py ota <device-id> 4.0.0   # publish URL via MQTT
+```
+
+In ~25 seconds the device downloads the .bin, writes to the inactive OTA slot, updates otadata, reboots, marks itself valid (or rolls back if it can't get back on the broker within 60s), and republishes alive with `version=4.0.0`. Watch live in another terminal: `python host/fleetctl.py status`.
+
+Without R2 creds the manual flow still works — `release.sh` prints the binary path, you drag-drop it into Cloudflare's R2 console, and use `fleetctl cmd <device-id> '{"url":"..."}'` to publish.
 
 ## What's actually shipped
 
