@@ -27,7 +27,7 @@
 #include "mqtt.h"
 #include "ota.h"
 
-#define FIRMWARE_VERSION    "3.0.0"
+#define FIRMWARE_VERSION    "3.0.1"
 
 // GPIO2 is the FNK0090's onboard LED (active-high). Confirmed against
 // Freenove's docs at docs.freenove.com/projects/fnk0090.

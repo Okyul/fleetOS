@@ -140,16 +140,19 @@ void fleetos_ota_start(const char *url)
 {
     if (!url || strlen(url) == 0) {
         ESP_LOGW(TAG, "fleetos_ota_start called with empty url");
+        fleetos_mqtt_publish_status("error", "empty_url");
         return;
     }
     if (strncmp(url, "https://", 8) != 0) {
         ESP_LOGW(TAG, "rejecting non-https URL: %s", url);
+        fleetos_mqtt_publish_status("error", "not_https");
         return;
     }
 
     ota_args_t *args = calloc(1, sizeof(*args));
     if (!args) {
         ESP_LOGE(TAG, "OOM allocating ota args");
+        fleetos_mqtt_publish_status("error", "oom");
         return;
     }
     strlcpy(args->url, url, sizeof(args->url));
@@ -157,6 +160,7 @@ void fleetos_ota_start(const char *url)
     BaseType_t r = xTaskCreate(ota_task, "ota", 8192, args, 5, NULL);
     if (r != pdPASS) {
         ESP_LOGE(TAG, "failed to spawn ota task");
+        fleetos_mqtt_publish_status("error", "task_spawn_failed");
         free(args);
     }
 }
