@@ -1,0 +1,11 @@
+# Force LF on text files regardless of platform. Stops the
+# "LF will be replaced by CRLF" warning on every commit from Windows
+# and avoids accidentally committing CRLF into shell scripts (which
+# bash refuses to execute with `bad interpreter` errors).
+* text=auto eol=lf
+
+# Binary firmware artifacts — never normalize line endings.
+*.bin   binary
+*.elf   binary
+*.png   binary
+*.jpg   binary
