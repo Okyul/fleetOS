@@ -59,14 +59,34 @@ mkdir -p "$OUT_DIR"
 cp "$SRC_BIN" "$OUT"
 ls -la "$OUT"
 
-cat <<EOF
+# Auto-upload if R2 creds are configured. Skip silently otherwise — keeps
+# the manual drag-drop path open for users who haven't set up an API token.
+HOST_ENV="$REPO_ROOT/host/.env"
+if [[ -f "$HOST_ENV" ]] && grep -q "^R2_ACCESS_KEY_ID=." "$HOST_ENV"; then
+    echo "==> R2 creds present, auto-uploading..."
+    if [[ -n "${VIRTUAL_ENV:-}" ]] || [[ -d "$HOME/fleetos-venv" ]]; then
+        # shellcheck disable=SC1091
+        [[ -z "${VIRTUAL_ENV:-}" ]] && source "$HOME/fleetos-venv/bin/activate"
+        python "$REPO_ROOT/host/fleetctl.py" upload "$OUT"
+        cat <<EOF
 
-==> next steps:
+==> push to a device with one command:
+     python host/fleetctl.py ota <device-id> ${VERSION}
+
+EOF
+    else
+        echo "(no venv found — install host/requirements.txt and re-run)"
+    fi
+else
+    cat <<EOF
+
+==> next steps (no R2 creds — manual upload):
   1. Upload $OUT to R2 (drag-drop in the Cloudflare console).
   2. Copy the public URL.
   3. Push to a device:
        python host/fleetctl.py cmd <device-id> '{"url":"<public-url>"}'
-  4. Watch the device on:
-       python host/fleetctl.py status
+
+(set R2_* vars in host/.env to skip steps 1-2 next time.)
 
 EOF
+fi
