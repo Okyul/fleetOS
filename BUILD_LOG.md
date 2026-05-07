@@ -202,6 +202,19 @@ Built a v3.1.0 binary with the `fleetos_ota_mark_valid()` call commented out (bo
 
 Total time bad-firmware-push → recovered = **1m23s**, fully automatic. Patched `mqtt.c` was reverted (never committed); `firmware-builds/fleetos-v3.1.0.bin` stays gitignored as a manual-test artifact.
 
+### Failure-mode validation (real broker traces)
+
+Beyond rollback, exercised every failure path the OTA cmd handler can hit. All published the right `status=error` event (after a small ota.c fix to also surface non-https / empty / OOM rejections):
+
+| Test | Cmd payload | Expected | Got |
+|------|-------------|----------|-----|
+| Bad URL (404) | `{"url":"https://pub-…/does-not-exist.bin"}` | downloading → error | downloading → `error/ESP_FAIL` (≈2s, no reboot) |
+| Malformed JSON | `not-valid-json-at-all` | error | `error/invalid_json` |
+| Missing url field | `{"foo":"bar"}` | error | `error/missing_url` |
+| Non-https URL | `{"url":"http://example.com/firmware.bin"}` | error | (initially silent — fixed) → `error/not_https` |
+
+Device kept running `v3.0.0` through every test. No reboots, no crashes, no partition mutation. The rejections happen before `xTaskCreate(ota_task)` ever fires.
+
 ### Day 5 first action
 
 1. **Record the demo video.** Shot list: 1Hz blink visible → run `fleetctl status` (alive + ready shown) → upload v2.0.0.bin → push URL via `fleetctl cmd` → watch `downloading` → `rebooting` → boot → new alive at 5Hz with `version=2.0.0`. ~60–90s, no narration needed.
